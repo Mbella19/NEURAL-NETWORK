@@ -1,0 +1,36 @@
+# Editable runtime configuration for the AI trading bot.
+# Values here override the Python defaults in config/settings.py; environment
+# variables prefixed with AI_TRADING_ take precedence over both.
+
+environment: "development"
+
+data:
+  root: "data"
+
+trading:
+  instrument: "EURUSD"
+  base_timeframe: "1m"
+  risk_per_trade: 0.01
+  max_daily_drawdown: 0.02
+  datasource_root: "/Users/gervaciusjr/Desktop/AI Trading Bot/Training data"
+
+model:
+  sequence_length: 256
+  feature_count: 168
+  hidden_size: 512
+  dropout: 0.2
+  learning_rate: 0.0001
+  batch_size: 64
+
+feature_engineering:
+  max_cache_size: 3
+  ensure_temporal_order: true
+  default_timeframes: ["1m", "5m", "15m", "1h"]
+  wick_window: 50
+  structure_lookback: 200
+
+logging:
+  level: "INFO"
+  log_dir: "logs/training"
+  rotation: "50 MB"
+  retention: "14 days"
