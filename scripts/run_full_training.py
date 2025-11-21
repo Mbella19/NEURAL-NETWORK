@@ -980,10 +980,10 @@ def main() -> None:
     # This allows MultiTaskModel aux_heads to transform features -> task predictions
     tft_backbone = TemporalFusionTransformer(
         input_dim=len(feature_columns),
-        d_model=128,
+        d_model=64,
         n_heads=4,
         n_layers=2,
-        dropout=0.4,  # FIX: Increased from 0.3 to 0.4
+        dropout=0.5,  # FIX: Increased from 0.4 to 0.5
         use_fsatten=True,
         output_features=True,  # CRITICAL: Output features for multi-task heads
     )
@@ -999,7 +999,7 @@ def main() -> None:
             head_dim = mt_train_ds.task_targets[task.__class__.__name__].shape[-1]
         aux_heads[task.__class__.__name__] = head_dim
     mt_model = MultiTaskModel(tft_backbone, aux_heads=aux_heads, dropout=0.6)  # FIX: Increased dropout from 0.5 to 0.6 in head
-    mt_optimizer = torch.optim.Adam(mt_model.parameters(), lr=1e-4, weight_decay=1e-4)
+    mt_optimizer = torch.optim.Adam(mt_model.parameters(), lr=5e-4, weight_decay=0.01)
 
     # Define device for training
     device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -1079,10 +1079,10 @@ def main() -> None:
     # You can keep base weights as 1.0, the model will adjust them automatically
     # But providing a slight hint helps convergence speed.
     task_weights = {
-        "Phase1DirectionTask": 1.0,
+        "Phase1DirectionTask": 2.0,
         "Phase2IndicatorTask": 1.0,
         "Phase3StructureTask": 1.0,
-        "Phase4SmartMoneyTask": 1.0,
+        "Phase4SmartMoneyTask": 0.1,
         "Phase5CandlestickTask": 1.0,
         "Phase6SupportResistanceTask": 1.0,
         "Phase7AdvancedSMTask": 1.0,
@@ -1095,7 +1095,7 @@ def main() -> None:
     # This helps initialize the shared representations before multi-task learning
     # FIXED: Now trains the actual mt_model (Phase 2 model) directly, ensuring perfect knowledge transfer
     # Each task trains for 5 epochs, updating the backbone + task-specific head
-    ENABLE_WARMUP = False  # Warmup disabled - trains mt_model one task at a time
+    ENABLE_WARMUP = False  # Warmup enabled - trains mt_model one task at a time
 
     if ENABLE_WARMUP:
         print("\nRunning curriculum warmup on all 9 tasks...")

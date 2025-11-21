@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -169,6 +170,19 @@ class MultiTaskTrainingLoop(TrainingLoop):
             f"Weighting strategy: {config.weighting_strategy}, Health monitoring: {config.monitor_task_health}"
         )
 
+        # Precompute a union feature mask so we only run one forward per batch.
+        # Per-task masks previously forced one forward per task and blew out GPU memory on MPS.
+        masks = list(getattr(train_dataset, "task_feature_masks", {}).values())
+        self.global_feature_mask: Optional[torch.Tensor] = None
+        if masks:
+            union_mask = masks[0].clone()
+            for m in masks[1:]:
+                union_mask = torch.maximum(union_mask, m)
+            self.global_feature_mask = union_mask
+            logger.bind(source="multitask_trainer").info(
+                f"Applying union feature mask with {int(self.global_feature_mask.sum().item())} active features"
+            )
+
     def _create_weighting_strategy(
         self, config: MultiTaskConfig, task_weights: Dict[str, float]
     ) -> TaskWeighting:
@@ -213,6 +227,9 @@ class MultiTaskTrainingLoop(TrainingLoop):
         self.model.train()
         device = self._device()
 
+        # Global mask applied once per batch to avoid per-task forwards
+        global_mask = self.global_feature_mask.to(device) if self.global_feature_mask is not None else None
+
         # Track totals for each task
         task_losses: Dict[str, float] = defaultdict(float)
         task_metrics: Dict[str, Dict[str, float]] = {
@@ -224,7 +241,8 @@ class MultiTaskTrainingLoop(TrainingLoop):
         for step, batch in enumerate(self.train_loader, start=1):
             inputs, targets_dict = batch
             inputs = inputs.to(device).contiguous()
-            task_masks = getattr(self.train_dataset, "task_feature_masks", {})
+            if global_mask is not None:
+                inputs = inputs * global_mask
 
             # Move all task targets to device
             targets_dict = {
@@ -235,64 +253,64 @@ class MultiTaskTrainingLoop(TrainingLoop):
             if not torch.isfinite(inputs).all():
                 raise RuntimeError(f"Non-finite inputs detected at epoch {epoch}, step {step}")
 
-            # Compute loss for each task
-            individual_losses = {}
-            for task_name in self.task_names:
-                if task_name not in targets_dict:
-                    logger.bind(source="multitask_trainer").warning(
-                        f"Task {task_name} missing from batch targets, skipping"
-                    )
-                    continue
+            # Mixed precision context to cut memory (critical on MPS)
+            autocast_context = nullcontext()
+            if self.amp_device_type == "cuda":
+                autocast_context = torch.cuda.amp.autocast()
+            elif self.amp_device_type == "mps":
+                autocast_context = torch.autocast(device_type="mps", dtype=torch.float16)
 
-                target = targets_dict[task_name]
-                mask = task_masks.get(task_name)
-                if mask is not None:
-                    mask = mask.to(device)
-                    task_inputs = inputs * mask
-                else:
-                    task_inputs = inputs
+            with autocast_context:
+                logits_dict = self.model(inputs)
 
-                # Forward pass per task (masked features if provided)
-                logits_dict = self.model(task_inputs)
+                # Compute loss for each task (single forward; heads are already in logits_dict)
+                individual_losses = {}
+                for task_name in self.task_names:
+                    if task_name not in targets_dict:
+                        logger.bind(source="multitask_trainer").warning(
+                            f"Task {task_name} missing from batch targets, skipping"
+                        )
+                        continue
 
-                task_logits = logits_dict.get(task_name, logits_dict.get("main"))
-                if task_logits is None:
-                    logger.bind(source="multitask_trainer").warning(
-                        f"Task {task_name} missing from model outputs, skipping"
-                    )
-                    continue
-                loss_fn = self.task_loss_fns[task_name]
+                    target = targets_dict[task_name]
+                    task_logits = logits_dict.get(task_name, logits_dict.get("main"))
+                    if task_logits is None:
+                        logger.bind(source="multitask_trainer").warning(
+                            f"Task {task_name} missing from model outputs, skipping"
+                        )
+                        continue
+                    loss_fn = self.task_loss_fns[task_name]
 
-                # Validate dimensions
-                if task_logits.shape[0] != target.shape[0]:
-                    raise RuntimeError(
-                        f"Batch size mismatch for {task_name}: "
-                        f"logits={task_logits.shape}, targets={target.shape}"
-                    )
+                    # Validate dimensions
+                    if task_logits.shape[0] != target.shape[0]:
+                        raise RuntimeError(
+                            f"Batch size mismatch for {task_name}: "
+                            f"logits={task_logits.shape}, targets={target.shape}"
+                        )
 
-                # Check for non-finite values
-                if not torch.isfinite(task_logits).all():
-                    logger.bind(source="multitask_trainer").error(
-                        f"Non-finite logits for task {task_name} at epoch {epoch}, step {step}"
-                    )
-                    raise RuntimeError(f"Non-finite logits for task {task_name}")
+                    # Check for non-finite values
+                    if not torch.isfinite(task_logits).all():
+                        logger.bind(source="multitask_trainer").error(
+                            f"Non-finite logits for task {task_name} at epoch {epoch}, step {step}"
+                        )
+                        raise RuntimeError(f"Non-finite logits for task {task_name}")
 
-                # Compute task loss
-                task_loss = loss_fn(task_logits, target)
+                    # Compute task loss
+                    task_loss = loss_fn(task_logits, target)
 
-                if not torch.isfinite(task_loss):
-                    logger.bind(source="multitask_trainer").error(
-                        f"Non-finite loss for task {task_name} at epoch {epoch}, step {step}"
-                    )
-                    raise RuntimeError(f"Non-finite loss for task {task_name}")
+                    if not torch.isfinite(task_loss):
+                        logger.bind(source="multitask_trainer").error(
+                            f"Non-finite loss for task {task_name} at epoch {epoch}, step {step}"
+                        )
+                        raise RuntimeError(f"Non-finite loss for task {task_name}")
 
-                individual_losses[task_name] = task_loss
-                task_losses[task_name] += task_loss.item()
+                    individual_losses[task_name] = task_loss
+                    task_losses[task_name] += float(task_loss.detach())
 
-                # Compute task-specific metrics
-                batch_task_metrics = self._compute_batch_metrics(task_logits, target)
-                for key, value in batch_task_metrics.items():
-                    task_metrics[task_name][key] += value
+                    # Compute task-specific metrics
+                    batch_task_metrics = self._compute_batch_metrics(task_logits.detach(), target.detach())
+                    for key, value in batch_task_metrics.items():
+                        task_metrics[task_name][key] += value
 
             # Compute gradient norms every 5 epochs (on first batch for efficiency)
             # This helps diagnose multi-task gradient interference
@@ -321,14 +339,23 @@ class MultiTaskTrainingLoop(TrainingLoop):
                     )
                     raise RuntimeError("Non-finite combined loss encountered")
 
-                # Backward pass
-                combined_loss.backward()
+                # Backward pass (AMP aware for CUDA, full precision elsewhere)
+                if self.amp_device_type == "cuda" and self.scaler:
+                    self.scaler.scale(combined_loss).backward()
+                else:
+                    combined_loss.backward()
 
             # Update weights (every N steps OR at the end of epoch)
             if step % self.config.gradient_accumulation == 0 or step == step_count:
                 from models.utils import clip_gradients
-                clip_gradients(self.model, self.config.max_grad_norm)
-                self.optimizer.step()
+                if self.amp_device_type == "cuda" and self.scaler and not self.mtl_config.normalize_gradients:
+                    self.scaler.unscale_(self.optimizer)
+                    clip_gradients(self.model, self.config.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    clip_gradients(self.model, self.config.max_grad_norm)
+                    self.optimizer.step()
                 self.optimizer.zero_grad()
 
         # Average metrics over all steps
@@ -363,6 +390,8 @@ class MultiTaskTrainingLoop(TrainingLoop):
         self.model.eval()
         device = self._device()
 
+        global_mask = self.global_feature_mask.to(device) if self.global_feature_mask is not None else None
+
         # Track totals for each task
         task_losses: Dict[str, float] = defaultdict(float)
         task_metrics: Dict[str, Dict[str, float]] = {
@@ -374,7 +403,8 @@ class MultiTaskTrainingLoop(TrainingLoop):
         with torch.no_grad():
             for inputs, targets_dict in self.val_loader:
                 inputs = inputs.to(device).contiguous()
-                task_masks = getattr(self.val_loader.dataset, "task_feature_masks", {})
+                if global_mask is not None:
+                    inputs = inputs * global_mask
 
                 # Move all task targets to device
                 targets_dict = {
@@ -382,20 +412,14 @@ class MultiTaskTrainingLoop(TrainingLoop):
                     for task_name, target in targets_dict.items()
                 }
 
+                logits_dict = self.model(inputs)
+
                 # Compute loss for each task
                 for task_name in self.task_names:
                     if task_name not in targets_dict:
                         continue
 
                     target = targets_dict[task_name]
-                    mask = task_masks.get(task_name)
-                    if mask is not None:
-                        mask = mask.to(device)
-                        task_inputs = inputs * mask
-                    else:
-                        task_inputs = inputs
-
-                    logits_dict = self.model(task_inputs)
                     task_logits = logits_dict.get(task_name, logits_dict.get("main"))
                     if task_logits is None:
                         continue

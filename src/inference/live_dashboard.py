@@ -18,7 +18,7 @@ from .model_loader import load_multitask_model
 from .predictor import MultiTaskPredictor
 
 DEFAULT_TESTING_CSV = Path(
-    "/Users/gervaciusjr/Desktop/AI Trading Bot/Testing Data/EURUSD_M1_202501020001_202510292358.csv"
+    "/Users/gervaciusjr/Desktop/AI Trading Bot/Training data/eurusd_m1_5y_part2.csv"
 )
 DEFAULT_CHECKPOINT = Path("checkpoints/multitask/multitask_tft.pt")
 DEFAULT_TASKS = (

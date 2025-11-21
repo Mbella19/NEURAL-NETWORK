@@ -47,16 +47,13 @@ class SupportResistanceFeatures(BaseFeatureCalculator):
         high = frame["HIGH"]
         low = frame["LOW"]
 
-        # Identify local extrema
-        rolling_high = high.rolling(window=self.window, center=True, min_periods=1)
-        rolling_low = low.rolling(window=self.window, center=True, min_periods=1)
+        # Identify local extrema using only past data to avoid look-ahead leakage
+        rolling_high = high.rolling(window=self.window, center=False, min_periods=1)
+        rolling_low = low.rolling(window=self.window, center=False, min_periods=1)
 
         local_highs = (high == rolling_high.max()).astype(int)
         local_lows = (low == rolling_low.min()).astype(int)
 
-        levels = self._cluster_levels(high, local_highs, kind="high") + self._cluster_levels(low, local_lows, kind="low")
-
-        # Memory-efficient batched approach to avoid OOM on low-RAM systems
         n_rows = len(frame)
         close_values = frame["CLOSE"].values.astype(np.float32)  # Use float32 to save memory
 
@@ -64,40 +61,43 @@ class SupportResistanceFeatures(BaseFeatureCalculator):
         sr_support = np.zeros(n_rows, dtype=np.float32)
         sr_resistance = np.zeros(n_rows, dtype=np.float32)
         sr_confluence = np.zeros(n_rows, dtype=np.float32)
-        sr_distance = np.full(n_rows, np.inf, dtype=np.float32)
+        sr_distance = np.full(n_rows, np.inf, dtype=np.float32)  # stays inf until a level forms
 
-        if levels:
-            # Process in batches to limit memory usage
-            batch_size = min(50, len(levels))  # Process max 50 levels at a time
-            level_prices = np.array([level.price for level in levels], dtype=np.float32)
-            level_strengths = np.array([level.strength for level in levels], dtype=np.float32)
-            is_psych = np.abs(level_prices * 100 - np.round(level_prices * 100)) <= 0.05
+        # Build levels incrementally so each row only sees history up to that point (prevents leakage)
+        support_levels: List[SupportResistanceLevel] = []
+        resistance_levels: List[SupportResistanceLevel] = []
 
-            for i in range(0, len(levels), batch_size):
-                batch_end = min(i + batch_size, len(levels))
-                batch_prices = level_prices[i:batch_end]
-                batch_strengths = level_strengths[i:batch_end]
-                batch_psych = is_psych[i:batch_end]
+        def _update_levels(levels: List[SupportResistanceLevel], value: float) -> None:
+            """Merge the new value into existing clustered levels or create a new one."""
+            for level in reversed(levels):
+                if abs(level.price - value) <= self.prominence:
+                    level.price = (level.price + value) / 2
+                    level.strength += 1
+                    return
+            levels.append(SupportResistanceLevel(price=float(value), strength=1.0))
 
-                # Compute distances for this batch (shape: batch_size × n_rows)
-                distances = np.abs(close_values[np.newaxis, :] - batch_prices[:, np.newaxis])
-                sr_distance = np.minimum(sr_distance, np.min(distances, axis=0))
+        for idx, close_price in enumerate(close_values):
+            if local_lows.iloc[idx]:
+                _update_levels(support_levels, float(low.iloc[idx]))
+            if local_highs.iloc[idx]:
+                _update_levels(resistance_levels, float(high.iloc[idx]))
 
-                # Determine support vs resistance
-                is_support = batch_prices[:, np.newaxis] <= close_values[np.newaxis, :]
+            all_levels: List[SupportResistanceLevel] = support_levels + resistance_levels
+            if not all_levels:
+                continue
 
-                # Update support strengths
-                support_strengths = np.where(is_support, batch_strengths[:, np.newaxis], 0)
-                sr_support = np.maximum(sr_support, np.max(support_strengths, axis=0))
+            prices = np.fromiter((lvl.price for lvl in all_levels), dtype=np.float32)
+            strengths = np.fromiter((lvl.strength for lvl in all_levels), dtype=np.float32)
 
-                # Update resistance strengths
-                resistance_strengths = np.where(~is_support, batch_strengths[:, np.newaxis], 0)
-                sr_resistance = np.maximum(sr_resistance, np.max(resistance_strengths, axis=0))
+            distances = np.abs(prices - close_price)
+            sr_distance[idx] = float(distances.min())
 
-                # Update psychological confluence
-                if np.any(batch_psych):
-                    psych_strengths = np.where(batch_psych[:, np.newaxis], batch_strengths[:, np.newaxis], 0)
-                    sr_confluence = np.maximum(sr_confluence, np.max(psych_strengths, axis=0))
+            sr_support[idx] = max((lvl.strength for lvl in support_levels if lvl.price <= close_price), default=0.0)
+            sr_resistance[idx] = max((lvl.strength for lvl in resistance_levels if lvl.price > close_price), default=0.0)
+
+            psych_mask = np.abs(prices * 100 - np.round(prices * 100)) <= 0.05
+            if np.any(psych_mask):
+                sr_confluence[idx] = float(strengths[psych_mask].max())
 
         # Add suffix to avoid overwrites when using multiple windows/prominence values
         suffix = f"_W{self.window}"
@@ -106,7 +106,7 @@ class SupportResistanceFeatures(BaseFeatureCalculator):
                 f"SR_SUPPORT_STRENGTH{suffix}": sr_support,
                 f"SR_RESISTANCE_STRENGTH{suffix}": sr_resistance,
                 f"SR_PSYCHO_CONFLUENCE{suffix}": sr_confluence,
-                f"SR_DISTANCE{suffix}": pd.Series(sr_distance, index=frame.index).replace(np.inf, np.nan).bfill().ffill(),
+                f"SR_DISTANCE{suffix}": pd.Series(sr_distance, index=frame.index).replace(np.inf, np.nan),
                 f"SR_NEARBY{suffix}": (sr_distance <= self.prominence).astype(int),
             },
             index=frame.index,

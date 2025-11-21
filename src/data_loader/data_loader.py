@@ -21,14 +21,14 @@ from utils.logger import configure_logging, log_resource_snapshot
 # Ensure logging is configured when this module is imported directly.
 configure_logging()
 
-DEFAULT_FILE = "EURUSD_M1_202306010000_202412302358.csv"
-REQUIRED_COLUMNS = ("DATE", "TIME", "OPEN", "HIGH", "LOW", "CLOSE", "TICKVOL", "VOL", "SPREAD")
+DEFAULT_FILE = "eurusd_m1_5y_part2.csv"
+REQUIRED_COLUMNS = ("TIMESTAMP", "OPEN", "HIGH", "LOW", "CLOSE", "TICKVOL", "SPREAD")
 DTYPE_HINTS = {
     "OPEN": "float32",
     "HIGH": "float32",
     "LOW": "float32",
     "CLOSE": "float32",
-    "TICKVOL": "int32",
+    "TICKVOL": "float32",  # Changed to float32 as input is float
     "VOL": "int32",
     "SPREAD": "float32",
 }
@@ -239,14 +239,32 @@ class MarketDataLoader:
 
         columns = {col: _clean(col) for col in frame.columns}
         frame = frame.rename(columns=columns)
-        if "TIMESTAMP" not in frame.columns and {"DATE", "TIME"} <= set(frame.columns):
-            frame["TIMESTAMP"] = pd.to_datetime(frame["DATE"] + " " + frame["TIME"], errors="coerce")
-        elif "timestamp" in frame.columns:
-            frame["TIMESTAMP"] = pd.to_datetime(frame["timestamp"], errors="coerce")
-            frame = frame.drop(columns=["timestamp"])
+        
+        # Handle column mapping for new 5-year dataset
+        if "TICK_VOLUME" in frame.columns and "TICKVOL" not in frame.columns:
+            frame = frame.rename(columns={"TICK_VOLUME": "TICKVOL"})
+            
+        # Handle timestamp creation/conversion
+        if "TIMESTAMP" not in frame.columns:
+            if {"DATE", "TIME"} <= set(frame.columns):
+                frame["TIMESTAMP"] = pd.to_datetime(frame["DATE"] + " " + frame["TIME"], errors="coerce")
+            elif "timestamp" in frame.columns:
+                 frame["TIMESTAMP"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        else:
+            # Ensure existing TIMESTAMP is actually datetime
+            frame["TIMESTAMP"] = pd.to_datetime(frame["TIMESTAMP"], errors="coerce")
+
+        # Ensure VOL exists (fill with 0 if missing)
+        if "VOL" not in frame.columns:
+            frame["VOL"] = 0
+
         for col, dtype in DTYPE_HINTS.items():
             if col in frame.columns:
                 frame[col] = frame[col].astype(dtype, errors="ignore")
+        
+        # Drop rows with invalid timestamps
+        frame = frame.dropna(subset=["TIMESTAMP"])
+        
         frame = frame.sort_values("TIMESTAMP").reset_index(drop=True)
         return frame
 

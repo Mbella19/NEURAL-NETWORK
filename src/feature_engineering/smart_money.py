@@ -18,6 +18,17 @@ class SMCState:
     trend: int = 0
 
 
+@dataclass
+class OrderBlock:
+    """Represents a discovered order block zone created after a BOS."""
+
+    lower: float
+    upper: float
+    direction: str  # "bull" or "bear"
+    created_idx: int
+    mitigated: bool = False
+
+
 class SmartMoneyFeatures(BaseFeatureCalculator):
     name = "smart_money"
     required_columns = ("OPEN", "HIGH", "LOW", "CLOSE")
@@ -36,8 +47,8 @@ class SmartMoneyFeatures(BaseFeatureCalculator):
             f"BOS_BEARISH{suffix}",
             f"CHOCH_BULLISH{suffix}",
             f"CHOCH_BEARISH{suffix}",
-            f"ORDER_BLOCK_BULL{suffix}",
-            f"ORDER_BLOCK_BEAR{suffix}",
+            f"ORDER_BLOCK_BULL{suffix}",  # now marks first mitigation/tap after BOS
+            f"ORDER_BLOCK_BEAR{suffix}",  # now marks first mitigation/tap after BOS
             f"FVG_UP{suffix}",
             f"FVG_DOWN{suffix}",
             f"LIQUIDITY_SWEEP{suffix}",
@@ -66,6 +77,32 @@ class SmartMoneyFeatures(BaseFeatureCalculator):
         ob_bull: List[int] = []
         ob_bear: List[int] = []
         liquidity_sweep: List[int] = []
+        active_bull_obs: List[OrderBlock] = []
+        active_bear_obs: List[OrderBlock] = []
+
+        def _add_order_block(direction: str, idx: int) -> None:
+            """Register an order block zone created by a BOS without marking past candles."""
+            if direction == "bull":
+                lower = min(low.iat[idx], open_.iat[idx], close.iat[idx])
+                upper = max(open_.iat[idx], close.iat[idx])
+                active_bull_obs.append(OrderBlock(lower=lower, upper=upper, direction="bull", created_idx=idx))
+            else:
+                lower = min(low.iat[idx], open_.iat[idx], close.iat[idx])
+                upper = max(high.iat[idx], open_.iat[idx], close.iat[idx])
+                active_bear_obs.append(OrderBlock(lower=lower, upper=upper, direction="bear", created_idx=idx))
+
+        def _check_mitigation(blocks: List[OrderBlock], idx: int) -> bool:
+            """Return True if price taps any active block; mark it mitigated and remove it."""
+            touched = False
+            price_low = low.iat[idx]
+            price_high = high.iat[idx]
+            for block in blocks:
+                if price_low <= block.upper + self.tolerance and price_high >= block.lower - self.tolerance:
+                    block.mitigated = True
+                    touched = True
+            # Remove mitigated blocks to avoid repeated flags
+            blocks[:] = [b for b in blocks if not b.mitigated]
+            return touched
 
         for idx in range(len(frame)):
             bull_bos = 0
@@ -100,18 +137,8 @@ class SmartMoneyFeatures(BaseFeatureCalculator):
                     if close.iat[prev_idx] < open_.iat[prev_idx]:
                         order_block_idx = prev_idx
                         break
-                ob_b = 1 if order_block_idx == idx else 0
-                if order_block_idx < idx and order_block_idx >= 0:
-                    # Ensure list has been populated up to this point
-                    while len(ob_bull) <= order_block_idx:
-                        ob_bull.append(0)
-                        bos_bull.append(0)
-                        bos_bear.append(0)
-                        choch_bull.append(0)
-                        choch_bear.append(0)
-                        ob_bear.append(0)
-                        liquidity_sweep.append(0)
-                    ob_bull[order_block_idx] = 1
+                if order_block_idx >= 0:
+                    _add_order_block(direction="bull", idx=order_block_idx)
             elif state.last_swing_low is not None and close.iat[idx] < state.last_swing_low - self.tolerance:
                 bear_bos = 1
                 if state.trend >= 0:
@@ -128,17 +155,8 @@ class SmartMoneyFeatures(BaseFeatureCalculator):
                     if close.iat[prev_idx] > open_.iat[prev_idx]:
                         order_block_idx = prev_idx
                         break
-                ob_s = 1 if order_block_idx == idx else 0
-                if order_block_idx < idx and order_block_idx >= 0:
-                    while len(ob_bear) <= order_block_idx:
-                        ob_bear.append(0)
-                        bos_bull.append(0)
-                        bos_bear.append(0)
-                        choch_bull.append(0)
-                        choch_bear.append(0)
-                        ob_bull.append(0)
-                        liquidity_sweep.append(0)
-                    ob_bear[order_block_idx] = 1
+                if order_block_idx >= 0:
+                    _add_order_block(direction="bear", idx=order_block_idx)
 
             # Liquidity sweep: wick breaks previous extreme but closes opposite
             if idx > 0:
@@ -150,6 +168,12 @@ class SmartMoneyFeatures(BaseFeatureCalculator):
                     liquidity_sweep.append(0)
             else:
                 liquidity_sweep.append(0)
+
+            # Mark when price returns to an active order block zone after BOS (no past marking)
+            if _check_mitigation(active_bull_obs, idx):
+                ob_b = 1
+            if _check_mitigation(active_bear_obs, idx):
+                ob_s = 1
 
             bos_bull.append(bull_bos)
             bos_bear.append(bear_bos)

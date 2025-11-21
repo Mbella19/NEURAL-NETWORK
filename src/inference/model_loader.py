@@ -93,7 +93,7 @@ def load_multitask_model(checkpoint_path: Path) -> ModelBundle:
 
     backbone = TemporalFusionTransformer(
         input_dim=len(feature_columns),
-        d_model=128,
+        d_model=64,
         n_heads=4,
         n_layers=2,
         dropout=0.3,

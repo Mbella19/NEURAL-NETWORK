@@ -41,6 +41,7 @@ ENV/
 logs/
 data/raw/
 data/processed/
+data/features/
 checkpoints/
 models/
 *.log
