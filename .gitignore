@@ -43,5 +43,5 @@ data/raw/
 data/processed/
 data/features/
 checkpoints/
-models/
+/models/
 *.log

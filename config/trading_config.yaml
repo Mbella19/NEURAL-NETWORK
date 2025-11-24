@@ -17,7 +17,7 @@ trading:
 model:
   sequence_length: 256
   feature_count: 168
-  hidden_size: 512
+  hidden_size: 128
   dropout: 0.2
   learning_rate: 0.0001
   batch_size: 64

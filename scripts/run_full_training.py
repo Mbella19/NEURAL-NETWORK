@@ -663,6 +663,8 @@ def main() -> None:
             use_fsatten=True,
             use_lstm=hybrid_lstm_enabled,
             timeframe_slices=tf_slices,
+            lstm_hidden=settings.model.hidden_size,
+            transformer_dim=settings.model.hidden_size,
         )
         phase_order = [
             Phase1DirectionTask(),
@@ -980,7 +982,7 @@ def main() -> None:
     # This allows MultiTaskModel aux_heads to transform features -> task predictions
     tft_backbone = TemporalFusionTransformer(
         input_dim=len(feature_columns),
-        d_model=64,
+        d_model=settings.model.hidden_size,
         n_heads=4,
         n_layers=2,
         dropout=0.5,  # FIX: Increased from 0.4 to 0.5
