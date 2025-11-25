@@ -17,14 +17,18 @@ class Phase1Config:
         "TREND_DIRECTION_L5",
         "SMA_14", "SMA_50", "SMA_200",
         "EMA_20",
-        "VOLATILITY_REGIME"
+        "VOLATILITY_REGIME",
+        "ATR",  # Added for volatility context
+        "RSI",  # Added for momentum context
     )
     threshold: float = 0.55
     max_epochs: int = 5
-    forecast_horizon: int = 10  # Medium horizon (direction)
-    take_profit: float = 0.0020  # ~20 pips
-    stop_loss: float = 0.0010    # ~10 pips
+    forecast_horizon: int = 20  # Increased from 10 (more time to hit target)
+    # FIX: More balanced take_profit/stop_loss for better label distribution
+    take_profit: float = 0.0015  # ~15 pips (reduced from 20)
+    stop_loss: float = 0.0015    # ~15 pips (increased from 10) - now 1:1 ratio
     time_limit: int = 50         # bars
+    use_atr_scaling: bool = True  # Scale TP/SL by ATR
 
 
 class Phase1DirectionTask:
@@ -41,15 +45,41 @@ class Phase1DirectionTask:
         return base_df.loc[:, self.config.feature_subset].copy()
 
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
+        """Compute triple-barrier labels with optional ATR scaling.
+
+        FIX: Use ATR-scaled take-profit/stop-loss for volatility-adaptive barriers.
+        This helps normalize the target across different volatility regimes.
+        """
         close = frame["CLOSE"].reset_index(drop=True)
         high = frame["HIGH"].reset_index(drop=True)
         low = frame["LOW"].reset_index(drop=True)
 
-        tp_mult = 1.0 + self.config.take_profit
-        sl_mult = 1.0 - self.config.stop_loss
         horizon = max(1, self.config.time_limit)
-
         labels = torch.zeros(len(close), dtype=torch.float32)
+
+        # Compute ATR for volatility-adaptive barriers
+        if self.config.use_atr_scaling and feature_frame is not None:
+            # Look for ATR column in feature frame
+            atr_col = None
+            for col in ["ATR", "M5_ATR"]:
+                if col in feature_frame.columns:
+                    atr_col = col
+                    break
+
+            if atr_col:
+                atr = feature_frame[atr_col].reset_index(drop=True).fillna(method='ffill').fillna(method='bfill')
+                # ATR-scaled barriers: 1.5x ATR for both TP and SL
+                atr_multiplier = 1.5
+                tp_distances = atr * atr_multiplier
+                sl_distances = atr * atr_multiplier
+            else:
+                # Fallback to fixed percentages
+                tp_distances = close * self.config.take_profit
+                sl_distances = close * self.config.stop_loss
+        else:
+            # Fixed percentage barriers
+            tp_distances = close * self.config.take_profit
+            sl_distances = close * self.config.stop_loss
 
         for idx in range(len(close)):
             if idx + 1 >= len(close):
@@ -58,8 +88,12 @@ class Phase1DirectionTask:
             window_high = high.iloc[idx + 1 : end].to_numpy()
             window_low = low.iloc[idx + 1 : end].to_numpy()
 
-            tp_level = close.iloc[idx] * tp_mult  # long take-profit
-            sl_level = close.iloc[idx] * sl_mult  # long stop-loss / short take-profit
+            entry_price = close.iloc[idx]
+            tp_dist = tp_distances.iloc[idx] if hasattr(tp_distances, 'iloc') else tp_distances[idx]
+            sl_dist = sl_distances.iloc[idx] if hasattr(sl_distances, 'iloc') else sl_distances[idx]
+
+            tp_level = entry_price + tp_dist  # long take-profit
+            sl_level = entry_price - sl_dist  # long stop-loss
 
             tp_hits = np.where(window_high >= tp_level)[0]
             sl_hits = np.where(window_low <= sl_level)[0]
@@ -68,13 +102,13 @@ class Phase1DirectionTask:
             sl_first = sl_hits[0] if sl_hits.size > 0 else None
 
             if tp_first is None and sl_first is None:
-                # Neither hit: fall back to direction of terminal price in window
+                # Neither hit: use direction of terminal price in window
                 terminal = close.iloc[end - 1]
-                labels[idx] = 1.0 if terminal > close.iloc[idx] else 0.0
+                labels[idx] = 1.0 if terminal > entry_price else 0.0
             elif tp_first is not None and sl_first is None:
-                labels[idx] = 1.0  # up move dominated
+                labels[idx] = 1.0  # up move dominated (TP hit first)
             elif tp_first is None and sl_first is not None:
-                labels[idx] = 0.0  # down move dominated
+                labels[idx] = 0.0  # down move dominated (SL hit first)
             else:
                 labels[idx] = 1.0 if tp_first <= sl_first else 0.0
 
@@ -88,4 +122,5 @@ class Phase1DirectionTask:
 
     @property
     def _horizon(self) -> int:
-        return max(1, min(10, self.config.forecast_horizon))
+        # FIX: Removed arbitrary cap at 10 - use configured forecast_horizon
+        return max(1, self.config.forecast_horizon)

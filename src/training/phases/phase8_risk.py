@@ -63,4 +63,5 @@ class Phase8RiskTask:
 
     @property
     def _horizon(self) -> int:
-        return max(1, min(10, self.config.forecast_horizon))
+        # FIX: Removed arbitrary cap at 10 - use configured forecast_horizon
+        return max(1, self.config.forecast_horizon)

@@ -9,6 +9,7 @@ rm -rf models/
 rm -rf wandb/
 rm -rf data/processed/*
 rm -rf data/features/*
+rm -f *.log
 
 # Recursive file/dir removal
 find . -type d -name "__pycache__" -exec rm -rf {} +

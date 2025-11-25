@@ -42,25 +42,66 @@ class Phase6SupportResistanceTask:
         return base_df.loc[:, self.config.feature_subset].copy()
 
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
+        """Compute targets for S/R level behavior prediction.
+
+        FIX: Instead of generic "significant move", predict if price will RESPECT
+        (bounce from) or BREAK through the nearest S/R level.
+        - Near support + bounces up = 1 (support respected)
+        - Near resistance + bounces down = 1 (resistance respected)
+        - Breakout or no S/R proximity = 0
+        """
         if feature_frame is None:
             raise ValueError("feature_frame is required to avoid recomputing S/R features with future data.")
 
-        base_df = feature_frame
         close = frame["CLOSE"]
         horizon = self._horizon
 
+        # Compute ATR for distance thresholds
         high = frame["HIGH"]
         low = frame["LOW"]
         prev_close = close.shift(1)
         tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         atr = tr.rolling(window=14).mean().bfill()
-
-        future_return = (close.shift(-horizon) - close) / close
         atr_pct = atr / close
-        significant_move = (future_return.abs() > (self.config.atr_multiplier * atr_pct)).astype(float)
-        target = torch.tensor(significant_move.fillna(0).values, dtype=torch.float32)
 
-        return target.unsqueeze(1)
+        # Get S/R features
+        support_strength = pd.Series(0.0, index=frame.index)
+        resistance_strength = pd.Series(0.0, index=frame.index)
+        sr_distance = pd.Series(1.0, index=frame.index)  # default far from S/R
+
+        for prefix in ["", "M5_"]:
+            dist_col = f"{prefix}SR_DISTANCE" if f"{prefix}SR_DISTANCE" in feature_frame.columns else f"{prefix}SR_DISTANCE_W10"
+            supp_col = f"{prefix}SR_SUPPORT_STRENGTH" if f"{prefix}SR_SUPPORT_STRENGTH" in feature_frame.columns else f"{prefix}SR_SUPPORT_STRENGTH_W10"
+            res_col = f"{prefix}SR_RESISTANCE_STRENGTH" if f"{prefix}SR_RESISTANCE_STRENGTH" in feature_frame.columns else f"{prefix}SR_RESISTANCE_STRENGTH_W10"
+
+            if dist_col in feature_frame.columns:
+                sr_distance = feature_frame[dist_col].fillna(1.0).abs()
+            if supp_col in feature_frame.columns:
+                support_strength = feature_frame[supp_col].fillna(0)
+            if res_col in feature_frame.columns:
+                resistance_strength = feature_frame[res_col].fillna(0)
+
+        # Determine if near support or resistance
+        near_sr_threshold = self.config.sr_proximity  # 0.2% by default
+        near_support = ((sr_distance < near_sr_threshold) & (support_strength > 0.5)).astype(float)
+        near_resistance = ((sr_distance < near_sr_threshold) & (resistance_strength > 0.5)).astype(float)
+
+        # Future price movement
+        future_return = (close.shift(-horizon) - close) / close
+        price_went_up = (future_return > 0).astype(float)
+
+        # S/R respected: near support and bounced up, OR near resistance and bounced down
+        support_respected = near_support * price_went_up
+        resistance_respected = near_resistance * (1 - price_went_up)
+
+        # Combined target
+        near_any_sr = ((near_support + near_resistance) > 0).astype(float)
+        sr_respected = support_respected + resistance_respected
+
+        # Final: S/R respected if near S/R, else direction prediction
+        target = near_any_sr * sr_respected + (1 - near_any_sr) * price_went_up
+
+        return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
 
     def evaluate(self, logits: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         preds = torch.sigmoid(logits)
@@ -70,4 +111,5 @@ class Phase6SupportResistanceTask:
 
     @property
     def _horizon(self) -> int:
-        return max(1, min(10, self.config.forecast_horizon))
+        # FIX: Removed arbitrary cap at 10 - use configured forecast_horizon
+        return max(1, self.config.forecast_horizon)

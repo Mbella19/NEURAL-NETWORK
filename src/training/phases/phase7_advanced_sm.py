@@ -47,22 +47,77 @@ class Phase7AdvancedSMTask:
         return base_df.loc[:, self.config.feature_subset].copy()
 
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
+        """Compute targets for SMC-based directional prediction.
+
+        FIX: Instead of generic "significant move", predict if SMC signals
+        correctly forecast the next directional move.
+        - Bullish SMC context (bullish OB, FVG up, bullish BOS) + price UP = 1
+        - Bearish SMC context (bearish OB, FVG down, bearish BOS) + price DOWN = 1
+        - SMC signal not confirmed = 0
+        """
         if feature_frame is None:
             raise ValueError("feature_frame is required")
 
         close = frame["CLOSE"]
         horizon = self._horizon
 
-        high = frame["HIGH"]
-        low = frame["LOW"]
-        prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(window=14).mean().bfill()
-
+        # Future price direction
         future_return = (close.shift(-horizon) - close) / close
-        atr_pct = atr / close
-        significant_move = (future_return.abs() > (self.config.atr_multiplier * atr_pct)).astype(float)
-        target = significant_move
+        price_went_up = (future_return > 0).astype(float)
+
+        # Aggregate bullish SMC signals
+        bullish_signal = pd.Series(0.0, index=frame.index)
+        bearish_signal = pd.Series(0.0, index=frame.index)
+
+        # Check for SMC columns (handle both suffixed and unsuffixed)
+        for prefix in ["", "M5_"]:
+            # Break of Structure
+            bos_bull = f"{prefix}BOS_BULLISH" if f"{prefix}BOS_BULLISH" in feature_frame.columns else f"{prefix}BOS_BULLISH_SW5"
+            bos_bear = f"{prefix}BOS_BEARISH" if f"{prefix}BOS_BEARISH" in feature_frame.columns else f"{prefix}BOS_BEARISH_SW5"
+            if bos_bull in feature_frame.columns:
+                bullish_signal += feature_frame[bos_bull].fillna(0)
+            if bos_bear in feature_frame.columns:
+                bearish_signal += feature_frame[bos_bear].fillna(0)
+
+            # Fair Value Gaps
+            fvg_up = f"{prefix}FVG_UP" if f"{prefix}FVG_UP" in feature_frame.columns else f"{prefix}FVG_UP_SW5"
+            fvg_down = f"{prefix}FVG_DOWN" if f"{prefix}FVG_DOWN" in feature_frame.columns else f"{prefix}FVG_DOWN_SW5"
+            if fvg_up in feature_frame.columns:
+                bullish_signal += feature_frame[fvg_up].fillna(0)
+            if fvg_down in feature_frame.columns:
+                bearish_signal += feature_frame[fvg_down].fillna(0)
+
+            # Order Blocks
+            ob_bull = f"{prefix}ORDER_BLOCK_BULL" if f"{prefix}ORDER_BLOCK_BULL" in feature_frame.columns else f"{prefix}ORDER_BLOCK_BULL_SW5"
+            ob_bear = f"{prefix}ORDER_BLOCK_BEAR" if f"{prefix}ORDER_BLOCK_BEAR" in feature_frame.columns else f"{prefix}ORDER_BLOCK_BEAR_SW5"
+            if ob_bull in feature_frame.columns:
+                bullish_signal += feature_frame[ob_bull].fillna(0)
+            if ob_bear in feature_frame.columns:
+                bearish_signal += feature_frame[ob_bear].fillna(0)
+
+            # Change of Character (reversal signal)
+            choch_bull = f"{prefix}CHOCH_BULLISH" if f"{prefix}CHOCH_BULLISH" in feature_frame.columns else f"{prefix}CHOCH_BULLISH_SW5"
+            choch_bear = f"{prefix}CHOCH_BEARISH" if f"{prefix}CHOCH_BEARISH" in feature_frame.columns else f"{prefix}CHOCH_BEARISH_SW5"
+            if choch_bull in feature_frame.columns:
+                bullish_signal += feature_frame[choch_bull].fillna(0) * 2  # Weight CHoCH higher (reversal)
+            if choch_bear in feature_frame.columns:
+                bearish_signal += feature_frame[choch_bear].fillna(0) * 2
+
+        # Net SMC bias
+        smc_bias = bullish_signal - bearish_signal
+        has_bullish_bias = (smc_bias > self.config.signal_threshold).astype(float)
+        has_bearish_bias = (smc_bias < -self.config.signal_threshold).astype(float)
+
+        # SMC signal confirmed by price action
+        bullish_confirmed = has_bullish_bias * price_went_up
+        bearish_confirmed = has_bearish_bias * (1 - price_went_up)
+
+        # Combined: SMC confirmed if bias exists, else direction prediction
+        has_smc_signal = ((has_bullish_bias + has_bearish_bias) > 0).astype(float)
+        smc_confirmed = bullish_confirmed + bearish_confirmed
+
+        # Final: SMC confirmation if signal exists, else simple direction
+        target = has_smc_signal * smc_confirmed + (1 - has_smc_signal) * price_went_up
 
         return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
 
@@ -74,4 +129,5 @@ class Phase7AdvancedSMTask:
 
     @property
     def _horizon(self) -> int:
-        return max(1, min(10, self.config.forecast_horizon))
+        # FIX: Removed arbitrary cap at 10 - use configured forecast_horizon
+        return max(1, self.config.forecast_horizon)

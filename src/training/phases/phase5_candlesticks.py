@@ -46,22 +46,56 @@ class Phase5CandlestickTask:
         return base_df.loc[:, self.config.feature_subset].copy()
 
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
+        """Compute targets for candlestick pattern confirmation.
+
+        FIX: Instead of generic "significant move", predict if bullish/bearish
+        candlestick patterns will be CONFIRMED by subsequent price action.
+        - Bullish pattern + price goes UP = 1 (pattern confirmed)
+        - Bearish pattern + price goes DOWN = 1 (pattern confirmed)
+        - Pattern not confirmed or no pattern = 0
+        """
         if feature_frame is None:
             raise ValueError("feature_frame is required")
 
         close = frame["CLOSE"]
         horizon = self._horizon
 
-        high = frame["HIGH"]
-        low = frame["LOW"]
-        prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(window=14).mean().bfill()
-
+        # Get future return direction
         future_return = (close.shift(-horizon) - close) / close
-        atr_pct = atr / close
-        significant_move = (future_return.abs() > (self.config.atr_multiplier * atr_pct)).astype(float)
-        target = significant_move
+        price_went_up = (future_return > 0).astype(float)
+
+        # Detect bullish and bearish patterns from features
+        # Bullish patterns: hammer, bullish_engulfing, marubozu (green)
+        # Bearish patterns: shooting_star, bearish_engulfing, marubozu (red)
+        bullish_pattern = pd.Series(0.0, index=frame.index)
+        bearish_pattern = pd.Series(0.0, index=frame.index)
+
+        # Check for pattern columns (handle both prefixed and unprefixed)
+        for prefix in ["", "M5_"]:
+            if f"{prefix}HAMMER" in feature_frame.columns:
+                bullish_pattern += feature_frame[f"{prefix}HAMMER"].fillna(0)
+            if f"{prefix}BULLISH_ENGULFING" in feature_frame.columns:
+                bullish_pattern += feature_frame[f"{prefix}BULLISH_ENGULFING"].fillna(0)
+            if f"{prefix}SHOOTING_STAR" in feature_frame.columns:
+                bearish_pattern += feature_frame[f"{prefix}SHOOTING_STAR"].fillna(0)
+            if f"{prefix}BEARISH_ENGULFING" in feature_frame.columns:
+                bearish_pattern += feature_frame[f"{prefix}BEARISH_ENGULFING"].fillna(0)
+
+        # Pattern confirmed: bullish pattern + up, OR bearish pattern + down
+        has_bullish = (bullish_pattern > 0).astype(float)
+        has_bearish = (bearish_pattern > 0).astype(float)
+
+        # Target = 1 if pattern is confirmed by price action
+        bullish_confirmed = has_bullish * price_went_up
+        bearish_confirmed = has_bearish * (1 - price_went_up)
+
+        # Combined: either pattern type confirmed
+        # If no pattern, use directional accuracy as fallback
+        pattern_exists = ((has_bullish + has_bearish) > 0).astype(float)
+        pattern_confirmed = bullish_confirmed + bearish_confirmed
+
+        # Final target: pattern_confirmed if pattern exists, else direction prediction
+        target = pattern_exists * pattern_confirmed + (1 - pattern_exists) * price_went_up
 
         return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
 
@@ -73,4 +107,5 @@ class Phase5CandlestickTask:
 
     @property
     def _horizon(self) -> int:
-        return max(1, min(10, self.config.forecast_horizon))
+        # FIX: Removed arbitrary cap at 10 - use configured forecast_horizon
+        return max(1, self.config.forecast_horizon)
