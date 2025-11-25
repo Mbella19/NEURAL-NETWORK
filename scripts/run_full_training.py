@@ -59,6 +59,7 @@ from training.phases.phase9_integration import Phase9IntegrationTask
 from training.phases.policy_execution import PolicyExecutionTask
 from training.trainer import TrainerConfig, TrainingLoop
 from training.loss_wrappers import make_weighted_bce, FocalLoss
+from training.task_weighting import AdaptiveWeighting, GradNormWeighting, StaticWeighting, UncertaintyWeighting
 from evaluation.backtester import Backtester
 from evaluation.metrics import sharpe_ratio
 
@@ -1007,7 +1008,6 @@ def main() -> None:
             head_dim = mt_train_ds.task_targets[task.__class__.__name__].shape[-1]
         aux_heads[task.__class__.__name__] = head_dim
     mt_model = MultiTaskModel(tft_backbone, aux_heads=aux_heads, dropout=0.3)  # FIXED: Reduced from 0.6 - was causing severe underfitting
-    mt_optimizer = torch.optim.Adam(mt_model.parameters(), lr=5e-4, weight_decay=0.01)
 
     # Define device for training
     device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -1080,9 +1080,12 @@ def main() -> None:
 
         mt_loss_fns[task_name] = lf
 
-    # Define base task weights (importance)
-    # CHANGE THIS:
+    # Define base task weights (importance) and weighting hyperparams
     WEIGHTING_STRATEGY = "uncertainty"  # Was "static"
+    mt_learning_rate = 5e-4  # Shared between optimizer and config
+    gradnorm_alpha = 1.5
+    gradnorm_lr = 0.025
+    adaptive_rate = 0.1
 
     # You can keep base weights as 1.0, the model will adjust them automatically
     # But providing a slight hint helps convergence speed.
@@ -1195,17 +1198,54 @@ def main() -> None:
 
     from training.multitask_trainer import MultiTaskTrainingLoop, MultiTaskConfig
 
+    # Initialize task weighting BEFORE building optimizer so its parameters are optimized
+    task_names = [t.__class__.__name__ for t in all_tasks]
+    num_tasks = len(task_names)
+    weighting_factories = {
+        "static": lambda: StaticWeighting(num_tasks, task_names, task_weights),
+        "uncertainty": lambda: UncertaintyWeighting(num_tasks, task_names, task_weights),
+        "gradnorm": lambda: GradNormWeighting(
+            num_tasks,
+            task_names,
+            task_weights,
+            alpha=gradnorm_alpha,
+            lr=gradnorm_lr,
+        ),
+        "adaptive": lambda: AdaptiveWeighting(
+            num_tasks,
+            task_names,
+            task_weights,
+            adapt_rate=adaptive_rate,
+        ),
+    }
+    if WEIGHTING_STRATEGY not in weighting_factories:
+        raise ValueError(f"Unknown weighting strategy: {WEIGHTING_STRATEGY}")
+    task_weighting = weighting_factories[WEIGHTING_STRATEGY]()
+
+    # Build optimizer with both model and weighting parameters (if any)
+    optimizer_params = [{"params": mt_model.parameters()}]
+    weighting_params = list(task_weighting.parameters())
+    if weighting_params:
+        optimizer_params.append(
+            {
+                "params": weighting_params,
+                "lr": mt_learning_rate * 0.1,
+                "weight_decay": 0.0,
+            }
+        )
+        print(f"  Optimizer will update {len(weighting_params)} weighting parameters ({WEIGHTING_STRATEGY})")
+    mt_optimizer = torch.optim.Adam(optimizer_params, lr=mt_learning_rate, weight_decay=0.01)
+
     # Configure multi-task training
     # Options: "static", "uncertainty", "gradnorm", "adaptive"
     # FIXED: Using "uncertainty" to automatically balance task weights based on loss magnitude
     # This solves the "Gradient Bully" problem where high-loss tasks dominate training
-    WEIGHTING_STRATEGY = "uncertainty"  # CHANGED from "static"
     MONITOR_HEALTH = True  # Enable task health monitoring
 
     mt_config = MultiTaskConfig(
         epochs=150,
         batch_size=128 if torch.backends.mps.is_available() or torch.cuda.is_available() else 32,
-        lr=5e-4,  # FIXED: Set to 5e-4 (safer than 1e-3 for multi-task, higher than 3e-4 for better convergence) + warmup below
+        lr=mt_learning_rate,  # FIXED: Set to 5e-4 (safer than 1e-3 for multi-task, higher than 3e-4 for better convergence) + warmup below
         gradient_accumulation=1,
         mixed_precision=torch.backends.mps.is_available() or torch.cuda.is_available(),
         scheduler="cosine_warmup",  # FIXED: Using cosine_warmup (10 epochs warmup from 1e-4 → 5e-4, then cosine decay)
@@ -1216,9 +1256,9 @@ def main() -> None:
         early_stopping_min_epochs=30,
         # Multi-task specific
         weighting_strategy=WEIGHTING_STRATEGY,
-        gradnorm_alpha=1.5,
-        gradnorm_lr=0.025,
-        adaptive_rate=0.1,
+        gradnorm_alpha=gradnorm_alpha,
+        gradnorm_lr=gradnorm_lr,
+        adaptive_rate=adaptive_rate,
         # Task health monitoring
         monitor_task_health=MONITOR_HEALTH,
         health_check_interval=1,
@@ -1254,20 +1294,8 @@ def main() -> None:
         config=mt_config,
         train_dataset=mt_train_ds,
         val_dataset=mt_val_ds,
+        task_weighting=task_weighting,
     )
-
-    # CRITICAL FIX: Add uncertainty weighting parameters to optimizer
-    # Without this, the learnable log_vars in UncertaintyWeighting are never updated,
-    # causing the "frozen brain" problem where task balancing cannot adapt.
-    if hasattr(mt_trainer.task_weighting, 'parameters'):
-        weighting_params = list(mt_trainer.task_weighting.parameters())
-        if weighting_params:
-            mt_optimizer.add_param_group({
-                'params': weighting_params,
-                'lr': mt_config.lr * 0.1,  # Lower LR for stability
-                'weight_decay': 0.0,  # No regularization on uncertainty params
-            })
-            print(f"  Added {len(weighting_params)} weighting parameters to optimizer")
 
     # Run multi-task training
     print("\nStarting multi-task training...")
