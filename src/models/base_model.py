@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import abc
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -18,7 +18,7 @@ class ModelMetadata:
     output_dim: Optional[int] = None
     sequence_length: Optional[int] = None
     features: Optional[int] = None
-    extra: Dict[str, Any] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseModel(abc.ABC, torch.nn.Module):
@@ -45,7 +45,7 @@ class BaseModel(abc.ABC, torch.nn.Module):
         (directory / "performance.json").write_text(json.dumps(self._performance, indent=2), encoding="utf-8")
 
     def load(self, directory: Path, map_location: Optional[str] = None) -> None:
-        state = torch.load(directory / "model.pt", map_location=map_location or "cpu")
+        state = torch.load(directory / "model.pt", map_location=map_location or "cpu", weights_only=True)
         self.load_state_dict(state)
         metadata_path = directory / "metadata.json"
         if metadata_path.exists():

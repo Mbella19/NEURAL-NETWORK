@@ -249,7 +249,7 @@ class EWC:
         Args:
             filepath: Path to load EWC state from
         """
-        state = torch.load(filepath)
+        state = torch.load(filepath, weights_only=False)
         self.fisher = state["fisher"]
         self.optimal_params = state["optimal_params"]
         self.ewc_lambda = state["ewc_lambda"]

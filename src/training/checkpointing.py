@@ -47,7 +47,7 @@ class CheckpointSystem:
             if not checkpoints:
                 raise FileNotFoundError("No checkpoints found")
             path = checkpoints[-1]
-        checkpoint = torch.load(path, map_location=map_location)
+        checkpoint = torch.load(path, map_location=map_location, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         return checkpoint["metrics"]

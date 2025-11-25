@@ -136,7 +136,7 @@ class CheckpointManager:
             if not checkpoints:
                 raise FileNotFoundError("No checkpoints available")
             path = checkpoints[-1]
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["state_dict"])
         if optimizer:
             optimizer.load_state_dict(checkpoint["optimizer"])

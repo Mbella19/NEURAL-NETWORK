@@ -173,7 +173,6 @@ class MarketDataLoader:
                 dtype=DTYPE_HINTS,
                 chunksize=chunk_size,
                 parse_dates={"timestamp": ["DATE", "TIME"]},
-                infer_datetime_format=True,
             )
         except Exception as exc:  # pragma: no cover - delegated to pandas
             raise DataLoaderError(f"Unable to stream file {path}") from exc

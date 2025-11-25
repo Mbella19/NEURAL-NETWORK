@@ -174,9 +174,16 @@ class MultiTaskDataset(Dataset):
 
     @staticmethod
     def _normalize_price_features(features_df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize price-level features to percentage distances from close.
+
+        IMPORTANT: Only normalize raw OHLC prices, NOT indicators like SMA/EMA
+        which may already be ratios, slopes, or other derived values.
+        """
         df = features_df.copy()
         prefixes = ["", "M5_", "M15_", "H1_"]
-        price_markers = ("OPEN", "HIGH", "LOW", "CLOSE", "SMA", "EMA")
+        # FIXED: Removed "SMA", "EMA" - these are often already ratios/indicators
+        # and normalizing them as prices corrupts the feature values
+        price_markers = ("OPEN", "HIGH", "LOW", "CLOSE")
         for prefix in prefixes:
             close_col = f"{prefix}CLOSE" if prefix else "CLOSE"
             if close_col not in df.columns:

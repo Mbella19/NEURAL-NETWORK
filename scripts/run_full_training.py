@@ -125,10 +125,16 @@ def logits_to_signal_with_strength(
 
 
 def _normalize_price_features(features_df: pd.DataFrame) -> pd.DataFrame:
-    """Convert price-level features to percentage distances to remove scale drift."""
+    """Convert price-level features to percentage distances to remove scale drift.
+
+    IMPORTANT: Only normalize raw OHLC prices, NOT indicators like SMA/EMA
+    which may already be ratios, slopes, or other derived values.
+    """
     df = features_df.copy()
     prefixes = ["", "M5_", "M15_", "H1_"]
-    price_markers = ("OPEN", "HIGH", "LOW", "CLOSE", "SMA", "EMA")
+    # FIXED: Removed "SMA", "EMA" - these are often already ratios/indicators
+    # and normalizing them as prices corrupts the feature values
+    price_markers = ("OPEN", "HIGH", "LOW", "CLOSE")
     for prefix in prefixes:
         close_col = f"{prefix}CLOSE" if prefix else "CLOSE"
         if close_col not in df.columns:
@@ -434,7 +440,7 @@ def _compute_feature_frames(
             }
         )
         agg = agg.dropna(subset=["OPEN", "HIGH", "LOW", "CLOSE"])
-        agg["SPREAD"] = agg["SPREAD"].fillna(method="ffill").fillna(method="bfill")
+        agg["SPREAD"] = agg["SPREAD"].ffill().bfill()
         agg = agg.reset_index().rename(columns={"TIMESTAMP": "TIMESTAMP"})
         return agg
 
@@ -577,7 +583,7 @@ def main() -> None:
             }
         )
         agg = agg.dropna(subset=["OPEN", "HIGH", "LOW", "CLOSE"])
-        agg["SPREAD"] = agg["SPREAD"].fillna(method="ffill").fillna(method="bfill")
+        agg["SPREAD"] = agg["SPREAD"].ffill().bfill()
         agg = agg.reset_index().rename(columns={"TIMESTAMP": "TIMESTAMP"})
         return agg
 
@@ -659,7 +665,7 @@ def main() -> None:
         shared_model = HybridModel(
             input_dim=len(feature_columns),
             output_dim=1,
-            dropout=0.5,
+            dropout=0.2,  # FIXED: Reduced from 0.5 - too aggressive for noisy financial data
             use_fsatten=True,
             use_lstm=hybrid_lstm_enabled,
             timeframe_slices=tf_slices,
@@ -818,7 +824,7 @@ def main() -> None:
             model = HybridModel(
                 input_dim=len(feature_columns),
                 output_dim=phase.output_dim,
-                dropout=0.5,
+                dropout=0.2,  # FIXED: Reduced from 0.5 - too aggressive for noisy financial data
                 use_fsatten=True,
                 use_lstm=hybrid_lstm_enabled,
                 timeframe_slices=tf_slices,
@@ -985,7 +991,7 @@ def main() -> None:
         d_model=settings.model.hidden_size,
         n_heads=4,
         n_layers=2,
-        dropout=0.5,  # FIX: Increased from 0.4 to 0.5
+        dropout=0.2,  # FIXED: Reduced from 0.5 - too aggressive, causes underfitting on noisy data
         use_fsatten=True,
         output_features=True,  # CRITICAL: Output features for multi-task heads
     )
@@ -1000,7 +1006,7 @@ def main() -> None:
             # Fallback to target shape for regression tasks
             head_dim = mt_train_ds.task_targets[task.__class__.__name__].shape[-1]
         aux_heads[task.__class__.__name__] = head_dim
-    mt_model = MultiTaskModel(tft_backbone, aux_heads=aux_heads, dropout=0.6)  # FIX: Increased dropout from 0.5 to 0.6 in head
+    mt_model = MultiTaskModel(tft_backbone, aux_heads=aux_heads, dropout=0.3)  # FIXED: Reduced from 0.6 - was causing severe underfitting
     mt_optimizer = torch.optim.Adam(mt_model.parameters(), lr=5e-4, weight_decay=0.01)
 
     # Define device for training
@@ -1249,6 +1255,19 @@ def main() -> None:
         train_dataset=mt_train_ds,
         val_dataset=mt_val_ds,
     )
+
+    # CRITICAL FIX: Add uncertainty weighting parameters to optimizer
+    # Without this, the learnable log_vars in UncertaintyWeighting are never updated,
+    # causing the "frozen brain" problem where task balancing cannot adapt.
+    if hasattr(mt_trainer.task_weighting, 'parameters'):
+        weighting_params = list(mt_trainer.task_weighting.parameters())
+        if weighting_params:
+            mt_optimizer.add_param_group({
+                'params': weighting_params,
+                'lr': mt_config.lr * 0.1,  # Lower LR for stability
+                'weight_decay': 0.0,  # No regularization on uncertainty params
+            })
+            print(f"  Added {len(weighting_params)} weighting parameters to optimizer")
 
     # Run multi-task training
     print("\nStarting multi-task training...")

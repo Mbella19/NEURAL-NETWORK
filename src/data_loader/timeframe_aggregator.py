@@ -97,7 +97,7 @@ class TimeframeAggregator:
         )
 
         aggregated = aggregated.dropna(subset=["OPEN", "HIGH", "LOW", "CLOSE"])
-        aggregated["SPREAD"] = aggregated["SPREAD"].fillna(method="ffill").fillna(method="bfill")
+        aggregated["SPREAD"] = aggregated["SPREAD"].ffill().bfill()
         aggregated = aggregated.reset_index().rename(columns={"TIMESTAMP": "END_TIME"})
         aggregated["START_TIME"] = aggregated["END_TIME"] - pd.to_timedelta(freq)
         aggregated = aggregated[["START_TIME", "END_TIME", "OPEN", "HIGH", "LOW", "CLOSE", "TICKVOL", "VOL", "SPREAD"]]

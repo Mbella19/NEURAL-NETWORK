@@ -96,7 +96,7 @@ class DataPreprocessor:
     @staticmethod
     def _handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        df[numeric_cols] = df[numeric_cols].fillna(method="ffill").fillna(method="bfill")
+        df[numeric_cols] = df[numeric_cols].ffill().bfill()
         df = df.dropna(subset=["OPEN", "HIGH", "LOW", "CLOSE"])
         return df.reset_index(drop=True)
 

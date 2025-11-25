@@ -47,7 +47,7 @@ class TechnicalIndicatorFeatures(BaseFeatureCalculator):
         features: Dict[str, pd.Series] = {}
 
         for window in self.sma_windows:
-            sma = close.rolling(window=window, min_periods=window).mean().fillna(method="bfill")
+            sma = close.rolling(window=window, min_periods=window).mean().bfill()
             features[f"SMA_{window}"] = (close - sma) / sma
         for window in self.ema_windows:
             ema = close.ewm(span=window, adjust=False).mean()
@@ -62,7 +62,7 @@ class TechnicalIndicatorFeatures(BaseFeatureCalculator):
         features["MACD_HIST"] = macd_line - macd_signal
 
         features["STOCH_K"] = self._stochastic_k(high, low, close, self.stoch_k)
-        features["STOCH_D"] = features["STOCH_K"].rolling(window=self.stoch_d, min_periods=self.stoch_d).mean().fillna(method="bfill")
+        features["STOCH_D"] = features["STOCH_K"].rolling(window=self.stoch_d, min_periods=self.stoch_d).mean().bfill()
 
         features["ATR"] = self._atr(high, low, close, self.atr_window)
         features["ADX"] = self._adx(high, low, close, self.adx_window)

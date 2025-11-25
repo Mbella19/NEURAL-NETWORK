@@ -83,7 +83,7 @@ def load_multitask_model(checkpoint_path: Path) -> ModelBundle:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     feature_columns: List[str] = ckpt.get("feature_columns")
     if not feature_columns:
         raise ValueError("Checkpoint missing 'feature_columns'")
