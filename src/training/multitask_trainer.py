@@ -288,15 +288,30 @@ class MultiTaskTrainingLoop(TrainingLoop):
                             f"logits={task_logits.shape}, targets={target.shape}"
                         )
 
-                    # Check for non-finite values
+                    # Check for non-finite values in logits
                     if not torch.isfinite(task_logits).all():
                         logger.bind(source="multitask_trainer").error(
                             f"Non-finite logits for task {task_name} at epoch {epoch}, step {step}"
                         )
                         raise RuntimeError(f"Non-finite logits for task {task_name}")
 
-                    # Compute task loss
-                    task_loss = loss_fn(task_logits, target)
+                    # Handle NaN targets (masked samples from task definitions)
+                    # NaN targets indicate samples that should be excluded from loss computation
+                    valid_mask = ~torch.isnan(target)
+                    if target.dim() > 1:
+                        # For multi-dimensional targets, check if any element in each sample is valid
+                        valid_mask = valid_mask.all(dim=-1) if target.dim() == 2 else valid_mask.view(target.shape[0], -1).all(dim=-1)
+
+                    if not valid_mask.any():
+                        # Skip this task for this batch - no valid samples
+                        continue
+
+                    # Compute task loss on valid samples only
+                    if valid_mask.all():
+                        task_loss = loss_fn(task_logits, target)
+                    else:
+                        # Apply loss only on valid (non-NaN) samples
+                        task_loss = loss_fn(task_logits[valid_mask], target[valid_mask])
 
                     if not torch.isfinite(task_loss):
                         logger.bind(source="multitask_trainer").error(
@@ -326,8 +341,11 @@ class MultiTaskTrainingLoop(TrainingLoop):
             # FIXED: Apply per-task gradient normalization to balance gradient magnitudes
             if self.mtl_config.normalize_gradients:
                 # Normalize gradients across tasks to prevent imbalance
-                combined_loss = self._apply_gradient_normalization(individual_losses)
-                combined_loss = combined_loss / self.config.gradient_accumulation
+                # Note: gradient_accumulation is applied inside the function before backward
+                combined_loss = self._apply_gradient_normalization(
+                    individual_losses,
+                    self.config.gradient_accumulation
+                )
             else:
                 # Standard approach: combine losses and do single backward pass
                 combined_loss = self.task_weighting(individual_losses, epoch)
@@ -425,12 +443,24 @@ class MultiTaskTrainingLoop(TrainingLoop):
                         continue
                     loss_fn = self.task_loss_fns[task_name]
 
-                    # Check for non-finite values
+                    # Check for non-finite values in logits
                     if not torch.isfinite(task_logits).all():
                         raise RuntimeError(f"Non-finite logits for task {task_name} during validation")
 
-                    # Compute task loss
-                    task_loss = loss_fn(task_logits, target)
+                    # Handle NaN targets (masked samples from task definitions)
+                    valid_mask = ~torch.isnan(target)
+                    if target.dim() > 1:
+                        valid_mask = valid_mask.all(dim=-1) if target.dim() == 2 else valid_mask.view(target.shape[0], -1).all(dim=-1)
+
+                    if not valid_mask.any():
+                        # Skip this task for this batch - no valid samples
+                        continue
+
+                    # Compute task loss on valid samples only
+                    if valid_mask.all():
+                        task_loss = loss_fn(task_logits, target)
+                    else:
+                        task_loss = loss_fn(task_logits[valid_mask], target[valid_mask])
 
                     if not torch.isfinite(task_loss):
                         raise RuntimeError(f"Non-finite validation loss for task {task_name}")
@@ -582,7 +612,8 @@ class MultiTaskTrainingLoop(TrainingLoop):
 
         return grad_norms
 
-    def _apply_gradient_normalization(self, individual_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _apply_gradient_normalization(self, individual_losses: Dict[str, torch.Tensor],
+                                       gradient_accumulation: int = 1) -> torch.Tensor:
         """Apply per-task gradient normalization to balance gradient magnitudes.
 
         This method computes gradients for each task separately, normalizes their magnitude,
@@ -591,9 +622,10 @@ class MultiTaskTrainingLoop(TrainingLoop):
 
         Args:
             individual_losses: Dict mapping task_name -> task loss tensor
+            gradient_accumulation: Number of steps to accumulate gradients over
 
         Returns:
-            Combined normalized loss tensor
+            Combined normalized loss tensor (for logging only - gradients already applied)
         """
         # Get backbone parameters (shared across all tasks)
         if hasattr(self.model, 'backbone'):
@@ -641,15 +673,15 @@ class MultiTaskTrainingLoop(TrainingLoop):
             weighted_loss = task_weight * task_loss
 
             # Compute scaling factor to normalize gradient magnitude
-            # Scale factor = (target_norm * mean_norm) / task_norm
+            # Scale each task's gradient to the mean norm across tasks
             denom = max(task_grad_norms[task_name], 1e-8)
-            scale = (target_norm * mean_norm) / denom
+            scale = mean_norm / denom
             # Safety clamp to avoid exploding/vanishing gradients
             scale = torch.tensor(scale, device=task_loss.device)
             scale = torch.clamp(scale, min=1e-3, max=10.0)
 
-            # Apply scaled backward pass
-            scaled_loss = scale * weighted_loss
+            # Apply scaled backward pass with gradient accumulation
+            scaled_loss = (scale * weighted_loss) / gradient_accumulation
             scaled_loss.backward(retain_graph=(task_name != list(individual_losses.keys())[-1]))
 
         # Return dummy loss for logging (actual gradients already applied)

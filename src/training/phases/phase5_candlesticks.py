@@ -48,11 +48,11 @@ class Phase5CandlestickTask:
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
         """Compute targets for candlestick pattern confirmation.
 
-        FIX: Instead of generic "significant move", predict if bullish/bearish
-        candlestick patterns will be CONFIRMED by subsequent price action.
+        REDESIGNED: Only compute targets for samples with candlestick patterns.
         - Bullish pattern + price goes UP = 1 (pattern confirmed)
         - Bearish pattern + price goes DOWN = 1 (pattern confirmed)
-        - Pattern not confirmed or no pattern = 0
+        - Pattern present but not confirmed = 0
+        - No pattern = NaN (masked in loss computation)
         """
         if feature_frame is None:
             raise ValueError("feature_frame is required")
@@ -90,14 +90,15 @@ class Phase5CandlestickTask:
         bearish_confirmed = has_bearish * (1 - price_went_up)
 
         # Combined: either pattern type confirmed
-        # If no pattern, use directional accuracy as fallback
         pattern_exists = ((has_bullish + has_bearish) > 0).astype(float)
         pattern_confirmed = bullish_confirmed + bearish_confirmed
 
-        # Final target: pattern_confirmed if pattern exists, else direction prediction
-        target = pattern_exists * pattern_confirmed + (1 - pattern_exists) * price_went_up
+        # FIXED: Use NaN for samples WITHOUT patterns (will be masked in loss computation)
+        # This prevents mixing two different prediction problems
+        target = pattern_confirmed.copy()
+        target[pattern_exists == 0] = float('nan')
 
-        return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
+        return torch.tensor(target.values, dtype=torch.float32).unsqueeze(1)
 
     def evaluate(self, logits: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         preds = torch.sigmoid(logits)

@@ -1217,11 +1217,11 @@ def main() -> None:
         monitor_task_health=MONITOR_HEALTH,
         health_check_interval=1,
         stuck_patience=20,  # FIXED: Increased from 5 to 20 - multi-task learning needs more patience
-        stuck_variance_threshold=1e-6,  # FIX: Lower threshold significantly. 0.001 was too high for variance check.
+        stuck_variance_threshold=1e-4,  # FIXED: Changed from 1e-6 which was too strict for detecting stuck tasks
         overfitting_ratio_threshold=3.0,  # FIXED: Increased from 2.0 to 3.0 - allow more train/val gap
         loss_explosion_threshold=100.0,
         loss_explosion_ratio=10.0,
-        bad_task_action="log_only",  # FIXED: Changed from "reduce_weight" to "log_only" - prevents weight collapse
+        bad_task_action="reduce_weight",  # FIXED: Re-enabled weight reduction for unhealthy tasks (now that grad norm is fixed)
         weight_reduction_factor=0.5,
         update_task_weights_interval=1,
         # FIXED: Enable per-task gradient normalization to balance gradient magnitudes

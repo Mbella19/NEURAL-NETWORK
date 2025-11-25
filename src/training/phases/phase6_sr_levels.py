@@ -44,11 +44,12 @@ class Phase6SupportResistanceTask:
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
         """Compute targets for S/R level behavior prediction.
 
-        FIX: Instead of generic "significant move", predict if price will RESPECT
-        (bounce from) or BREAK through the nearest S/R level.
+        REDESIGNED: Only compute targets for samples near S/R levels.
         - Near support + bounces up = 1 (support respected)
         - Near resistance + bounces down = 1 (resistance respected)
-        - Breakout or no S/R proximity = 0
+        - Near support + breaks down = 0 (support broken)
+        - Near resistance + breaks up = 0 (resistance broken)
+        - NOT near S/R = NaN (masked in loss computation)
         """
         if feature_frame is None:
             raise ValueError("feature_frame is required to avoid recomputing S/R features with future data.")
@@ -81,10 +82,14 @@ class Phase6SupportResistanceTask:
             if res_col in feature_frame.columns:
                 resistance_strength = feature_frame[res_col].fillna(0)
 
+        # Use ATR-based proximity threshold for better adaptability
+        # Instead of fixed 0.2%, use percentage of ATR for dynamic threshold
+        atr_based_threshold = self.config.atr_multiplier * atr_pct
+        near_sr_threshold = atr_based_threshold.clip(lower=0.001, upper=0.02)  # Clamp to reasonable range
+
         # Determine if near support or resistance
-        near_sr_threshold = self.config.sr_proximity  # 0.2% by default
-        near_support = ((sr_distance < near_sr_threshold) & (support_strength > 0.5)).astype(float)
-        near_resistance = ((sr_distance < near_sr_threshold) & (resistance_strength > 0.5)).astype(float)
+        near_support = ((sr_distance < near_sr_threshold) & (support_strength > 0.3)).astype(float)
+        near_resistance = ((sr_distance < near_sr_threshold) & (resistance_strength > 0.3)).astype(float)
 
         # Future price movement
         future_return = (close.shift(-horizon) - close) / close
@@ -94,14 +99,16 @@ class Phase6SupportResistanceTask:
         support_respected = near_support * price_went_up
         resistance_respected = near_resistance * (1 - price_went_up)
 
-        # Combined target
+        # Combined S/R behavior target
         near_any_sr = ((near_support + near_resistance) > 0).astype(float)
         sr_respected = support_respected + resistance_respected
 
-        # Final: S/R respected if near S/R, else direction prediction
-        target = near_any_sr * sr_respected + (1 - near_any_sr) * price_went_up
+        # FIXED: Use NaN for samples NOT near S/R (will be masked in loss computation)
+        # This prevents the fallback mechanism that was causing 99.95% positive rate
+        target = sr_respected.copy()
+        target[near_any_sr == 0] = float('nan')
 
-        return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
+        return torch.tensor(target.values, dtype=torch.float32).unsqueeze(1)
 
     def evaluate(self, logits: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         preds = torch.sigmoid(logits)

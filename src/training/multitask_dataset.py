@@ -120,6 +120,9 @@ class MultiTaskDataset(Dataset):
         Returns:
             features: Tensor of shape [sequence_length, num_features]
             targets: Dict mapping task_name -> target tensor
+
+        Note: Per-task feature masking is handled at the trainer level using a
+        global union mask for efficiency (see MultiTaskTrainingLoop.global_feature_mask).
         """
         start = idx * self.stride
         end = start + self.sequence_length
@@ -130,14 +133,8 @@ class MultiTaskDataset(Dataset):
         # Get targets for all tasks (at the final timestep)
         targets = {}
         for task_name, task_targets in self.task_targets.items():
-            tgt = task_targets[end - 1]
-            if task_name in self.task_feature_masks:
-                mask = self.task_feature_masks[task_name].to(features.device)
-                masked = features * mask
-            else:
-                masked = features
-            targets[task_name] = tgt
-            # stash masked features per task for caller if needed
+            targets[task_name] = task_targets[end - 1]
+
         return features, targets
 
     def get_task_statistics(self) -> Dict[str, Dict[str, float]]:

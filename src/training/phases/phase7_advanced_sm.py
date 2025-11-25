@@ -49,11 +49,11 @@ class Phase7AdvancedSMTask:
     def compute_targets(self, frame, feature_frame=None) -> torch.Tensor:
         """Compute targets for SMC-based directional prediction.
 
-        FIX: Instead of generic "significant move", predict if SMC signals
-        correctly forecast the next directional move.
-        - Bullish SMC context (bullish OB, FVG up, bullish BOS) + price UP = 1
-        - Bearish SMC context (bearish OB, FVG down, bearish BOS) + price DOWN = 1
-        - SMC signal not confirmed = 0
+        REDESIGNED: Only compute targets for samples with SMC signals.
+        - Bullish SMC context + price UP = 1 (signal confirmed)
+        - Bearish SMC context + price DOWN = 1 (signal confirmed)
+        - SMC signal present but not confirmed = 0
+        - No SMC signal = NaN (masked in loss computation)
         """
         if feature_frame is None:
             raise ValueError("feature_frame is required")
@@ -112,14 +112,16 @@ class Phase7AdvancedSMTask:
         bullish_confirmed = has_bullish_bias * price_went_up
         bearish_confirmed = has_bearish_bias * (1 - price_went_up)
 
-        # Combined: SMC confirmed if bias exists, else direction prediction
+        # Combined: whether SMC signal exists
         has_smc_signal = ((has_bullish_bias + has_bearish_bias) > 0).astype(float)
         smc_confirmed = bullish_confirmed + bearish_confirmed
 
-        # Final: SMC confirmation if signal exists, else simple direction
-        target = has_smc_signal * smc_confirmed + (1 - has_smc_signal) * price_went_up
+        # FIXED: Use NaN for samples WITHOUT SMC signals (will be masked in loss computation)
+        # This prevents mixing two different prediction problems
+        target = smc_confirmed.copy()
+        target[has_smc_signal == 0] = float('nan')
 
-        return torch.tensor(target.fillna(0).values, dtype=torch.float32).unsqueeze(1)
+        return torch.tensor(target.values, dtype=torch.float32).unsqueeze(1)
 
     def evaluate(self, logits: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         preds = torch.sigmoid(logits)
