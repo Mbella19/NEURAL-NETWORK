@@ -135,7 +135,8 @@ def _normalize_price_features(features_df: pd.DataFrame) -> pd.DataFrame:
     prefixes = ["", "M5_", "M15_", "H1_"]
     # FIXED: Removed "SMA", "EMA" - these are often already ratios/indicators
     # and normalizing them as prices corrupts the feature values
-    price_markers = ("OPEN", "HIGH", "LOW", "CLOSE")
+    # FIXED: Added "SMA", "EMA" to be normalized relative to CLOSE
+    price_markers = ("OPEN", "HIGH", "LOW", "CLOSE", "SMA", "EMA")
     for prefix in prefixes:
         close_col = f"{prefix}CLOSE" if prefix else "CLOSE"
         if close_col not in df.columns:
@@ -144,7 +145,8 @@ def _normalize_price_features(features_df: pd.DataFrame) -> pd.DataFrame:
         price_cols = [c for c in df.columns if c.startswith(prefix) and any(marker in c for marker in price_markers)]
         for col in price_cols:
             if col == close_col:
-                df[col] = 0.0
+                # Use percentage change to preserve price action/trend information
+                df[col] = df[col].pct_change().fillna(0.0)
             else:
                 df[col] = (df[col] - close_series) / close_series
     return df.fillna(0.0)
@@ -948,9 +950,9 @@ def main() -> None:
         Phase2IndicatorTask(),
         Phase3StructureTask(),
         Phase4SmartMoneyTask(),
-        Phase5CandlestickTask(),
-        Phase6SupportResistanceTask(),
-        Phase7AdvancedSMTask(),
+        # Phase5CandlestickTask(),      # Disabled: 9.54% imbalance, nan targets
+        # Phase6SupportResistanceTask(), # Disabled: 99.94% imbalance, broken targets
+        # Phase7AdvancedSMTask(),       # Disabled: nan targets
         Phase8RiskTask(),
         Phase9IntegrationTask(),
     ]
@@ -993,7 +995,7 @@ def main() -> None:
         n_heads=4,
         n_layers=2,
         dropout=0.2,  # FIXED: Reduced from 0.5 - too aggressive, causes underfitting on noisy data
-        use_fsatten=True,
+        use_fsatten=False,  # FIXED: Disabled to prevent filtering of low-frequency trend signals
         output_features=True,  # CRITICAL: Output features for multi-task heads
     )
 
@@ -1081,8 +1083,9 @@ def main() -> None:
         mt_loss_fns[task_name] = lf
 
     # Define base task weights (importance) and weighting hyperparams
-    WEIGHTING_STRATEGY = "uncertainty"  # Was "static"
-    mt_learning_rate = 5e-4  # Shared between optimizer and config
+    # Define base task weights (importance) and weighting hyperparams
+    WEIGHTING_STRATEGY = "static"  # Was "uncertainty" - switched to static to prevent broken tasks from dominating
+    mt_learning_rate = 1e-4  # Reduced from 5e-4 for stability
     gradnorm_alpha = 1.5
     gradnorm_lr = 0.025
     adaptive_rate = 0.1
@@ -1090,14 +1093,14 @@ def main() -> None:
     # You can keep base weights as 1.0, the model will adjust them automatically
     # But providing a slight hint helps convergence speed.
     task_weights = {
-        "Phase1DirectionTask": 2.0,
-        "Phase2IndicatorTask": 1.0,
-        "Phase3StructureTask": 1.0,
-        "Phase4SmartMoneyTask": 0.1,
-        "Phase5CandlestickTask": 1.0,
-        "Phase6SupportResistanceTask": 1.0,
-        "Phase7AdvancedSMTask": 1.0,
-        "Phase8RiskTask": 1.0,
+        "Phase1DirectionTask": 3.0,      # Increased from 2.0 (Critical)
+        "Phase2IndicatorTask": 2.0,      # Increased from 1.0 (Critical)
+        "Phase3StructureTask": 0.5,      # Decreased from 1.0 (Was dominating)
+        "Phase4SmartMoneyTask": 0.1,     # Decreased from 0.1 (Keep low)
+        "Phase5CandlestickTask": 0.0,    # Disabled
+        "Phase6SupportResistanceTask": 0.0, # Disabled
+        "Phase7AdvancedSMTask": 0.0,     # Disabled
+        "Phase8RiskTask": 0.5,           # Decreased from 1.0 (Was exploding)
         "Phase9IntegrationTask": 1.0,
         "PolicyExecutionTask": 1.0,
     }
@@ -1106,7 +1109,8 @@ def main() -> None:
     # This helps initialize the shared representations before multi-task learning
     # FIXED: Now trains the actual mt_model (Phase 2 model) directly, ensuring perfect knowledge transfer
     # Each task trains for 5 epochs, updating the backbone + task-specific head
-    ENABLE_WARMUP = False  # Warmup enabled - trains mt_model one task at a time
+    # Each task trains for 5 epochs, updating the backbone + task-specific head
+    ENABLE_WARMUP = True  # Warmup enabled - trains mt_model one task at a time
 
     if ENABLE_WARMUP:
         print("\nRunning curriculum warmup on all 9 tasks...")
@@ -1262,7 +1266,7 @@ def main() -> None:
         # Task health monitoring
         monitor_task_health=MONITOR_HEALTH,
         health_check_interval=1,
-        stuck_patience=20,  # FIXED: Increased from 5 to 20 - multi-task learning needs more patience
+        stuck_patience=40,  # FIXED: Increased from 20 to 40 - multi-task learning needs more patience
         stuck_variance_threshold=1e-4,  # FIXED: Changed from 1e-6 which was too strict for detecting stuck tasks
         overfitting_ratio_threshold=3.0,  # FIXED: Increased from 2.0 to 3.0 - allow more train/val gap
         loss_explosion_threshold=100.0,

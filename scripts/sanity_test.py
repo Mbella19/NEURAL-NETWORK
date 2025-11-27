@@ -32,7 +32,7 @@ sys.path.append(str(REPO_ROOT / "src"))
 sys.path.append(str(REPO_ROOT))
 
 from data_loader.data_loader import ingest_training_data
-from data_loader.preprocessor import preprocess_dataset
+from data_loader.preprocessor import preprocess_dataset, DataPreprocessor
 from feature_engineering.pipeline import build_default_feature_pipeline, run_feature_pipeline
 from training.phases.phase1_direction import Phase1DirectionTask
 from training.phases.phase2_indicators import Phase2IndicatorTask
@@ -289,16 +289,18 @@ def main():
 
     # Load data
     print("\nLoading data...")
-    settings = get_settings()
-    dfs = ingest_training_data(settings)
-
-    train_df = dfs["BTCUSDT_5m_train"]
+    # Load data
+    print("\nLoading data...")
+    # settings = get_settings() # Not needed for ingest_training_data call
+    result = ingest_training_data()
+    train_df = result.frame
     print(f"  Loaded {len(train_df)} samples")
 
     # Preprocess
     print("Preprocessing...")
-    out = preprocess_dataset(train_df, test_df=None, val_df=None)
-    train_df = out["train"]
+    processor = DataPreprocessor(frame=train_df)
+    out = processor.run()
+    train_df = out.train
 
     # Compute features
     print("Computing features...")

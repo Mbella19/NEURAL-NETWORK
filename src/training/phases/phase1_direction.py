@@ -54,7 +54,8 @@ class Phase1DirectionTask:
         high = frame["HIGH"].reset_index(drop=True)
         low = frame["LOW"].reset_index(drop=True)
 
-        horizon = max(1, self.config.time_limit)
+        # FIX: Use forecast_horizon to match data trimming (20 bars) instead of time_limit (50 bars)
+        horizon = max(1, self.config.forecast_horizon)
         labels = torch.zeros(len(close), dtype=torch.float32)
 
         # Compute ATR for volatility-adaptive barriers

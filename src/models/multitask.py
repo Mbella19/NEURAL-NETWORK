@@ -30,8 +30,10 @@ class MultiTaskModel(BaseModel):
         for name, dim in aux_heads.items():
             self.aux_heads[name] = nn.Sequential(
                 nn.LayerNorm(feat_dim),
+                nn.Linear(feat_dim, feat_dim),  # Hidden layer
+                nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(feat_dim, dim),
+                nn.Linear(feat_dim, dim),       # Output layer
             )
 
     def forward(self, inputs: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:

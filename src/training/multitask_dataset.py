@@ -183,7 +183,8 @@ class MultiTaskDataset(Dataset):
         prefixes = ["", "M5_", "M15_", "H1_"]
         # FIXED: Removed "SMA", "EMA" - these are often already ratios/indicators
         # and normalizing them as prices corrupts the feature values
-        price_markers = ("OPEN", "HIGH", "LOW", "CLOSE")
+        # FIXED: Added "SMA", "EMA" to be normalized relative to CLOSE
+        price_markers = ("OPEN", "HIGH", "LOW", "CLOSE", "SMA", "EMA")
         for prefix in prefixes:
             close_col = f"{prefix}CLOSE" if prefix else "CLOSE"
             if close_col not in df.columns:
@@ -192,7 +193,8 @@ class MultiTaskDataset(Dataset):
             price_cols = [c for c in df.columns if c.startswith(prefix) and any(marker in c for marker in price_markers)]
             for col in price_cols:
                 if col == close_col:
-                    df[col] = 0.0
+                    # Use percentage change to preserve price action/trend information
+                    df[col] = df[col].pct_change().fillna(0.0)
                 else:
                     df[col] = (df[col] - close_series) / close_series
         return df.fillna(0.0)
