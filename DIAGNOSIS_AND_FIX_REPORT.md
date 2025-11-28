@@ -1,26 +1,38 @@
-# Diagnosis and Fix Report
+# Training Diagnosis & Fix Report
 
-## 1. Explainability Failure
-**Issue**: The training script failed during the explainability step with the error: `Input and parameter tensors are not at the same device`.
-**Cause**: The `saliency_map`, `shap_values`, and `lime_explanation` functions were receiving input tensors directly from the dataset (CPU) while the model was on the GPU (MPS/CUDA).
-**Fix**: Updated `scripts/run_full_training.py` to explicitly move input tensors to the correct device (`.to(device)`) before passing them to the model.
+Based on the analysis of your training logs and codebase, here are the key findings and recommendations.
 
-## 2. Exploding Gradients in Phase 4 (Smart Money)
-**Issue**: Phase 4 showed extremely high gradient norms (~31.8), causing instability.
-**Cause**: The `CrossEntropyLoss` was using dynamically calculated class weights to handle imbalance. For extremely rare classes (like specific FVG patterns), these weights could become very large (e.g., >100x), causing gradients to explode.
-**Fix**: Clamped the calculated class weights in `scripts/run_full_training.py` to a maximum of `10.0`. This preserves the rebalancing effect without introducing numerical instability.
+## 1. The "Stuck" Phase 1 (Direction Task)
+**Status:** The Direction task is stuck at a loss of ~0.693, which corresponds to random guessing (predicting 0.5 probability for everything).
+**Cause:** The target generation logic falls back to "Terminal Price Direction" when neither Take Profit (TP) nor Stop Loss (SL) is hit within 50 bars.
+```python
+if tp_first is None and sl_first is None:
+    # Neither hit: fall back to direction of terminal price in window
+    terminal = close.iloc[end - 1]
+    labels[idx] = 1.0 if terminal > close.iloc[idx] else 0.0
+```
+In ranging markets, this fallback logic introduces significant noise (labeling random fluctuations as "trends"). The model correctly learns to ignore this noise by outputting 0.5.
+**Recommendation:**
+- **Increase `time_limit`**: Increase `time_limit` in `Phase1Config` (e.g., to 100 or 200 bars) to allow more trades to resolve naturally.
+- **Add "Neutral" Class**: Instead of forcing a 0/1 label on unresolved trades, mark them as ignored (mask them out) or introduce a 3rd "Neutral" class.
 
-## 3. Class Imbalance and Trivial Tasks (Phases 5, 6, 7)
-**Issue**: Phases 5 (Candlesticks), 6 (Support/Resistance), and 7 (Advanced SM) showed "stuck" accuracy and extremely high positive rates (~99% predicted positives in some logs).
-**Cause**: The target definition used a very low threshold (`0.0001` or 0.01%) for "significant move". In a 5-minute timeframe, price almost *always* moves more than 0.01% over 5-10 bars, making the target effectively "Always True". The model collapsed to predicting the majority class (1.0), achieving high "accuracy" but learning nothing useful.
-**Fix**: Increased the thresholds in the respective phase files to `0.0015` (0.15%).
-- `src/training/phases/phase5_candlesticks.py`: `profit_threshold` -> 0.0015
-- `src/training/phases/phase6_sr_levels.py`: `bounce_threshold` -> 0.0015
-- `src/training/phases/phase7_advanced_sm.py`: `profit_threshold` -> 0.0015
+## 2. The "Gradient Bully" Phase 4 (Smart Money)
+**Status:** Phase 4 (SMC) has extremely high gradient norms (up to 3.0) compared to other tasks (0.1 - 0.2), despite having a lower task weight (0.1).
+**Cause:** It uses `CrossEntropyLoss` on 3 classes, which generates larger gradients than the `BCEWithLogitsLoss` used by other tasks. This "loud" gradient is drowning out the signal from subtle tasks like Direction.
+**Recommendation:**
+- **Reduce Weight Further**: Lower `Phase4SmartMoneyTask` weight in `task_weights` to `0.01` or `0.05`.
+- **Gradient Clipping**: The `MultiTaskTrainingLoop` has `normalize_gradients=True`, but the `gradient_norm_target=1.0` is likely too high for the other tasks to compete with Phase 4. Try setting `gradient_norm_target=0.5`.
 
-This change makes the tasks non-trivial, requiring the model to identify *truly* significant moves, which should lead to better feature learning and more meaningful predictions.
+## 3. Phase 3 (Structure) is Promising
+**Status:** Loss is ~1.39. Random guessing for 5 classes (HH, HL, LH, LL, NONE) is ln(5) ≈ 1.61.
+**Finding:** The model *is* learning market structure! This is a strong foundation.
 
-## 4. Recommendations for Future Improvements
-- **Phase 1 (Direction)**: Currently binary (Up vs Not Up). Consider switching to 3-class classification (Up, Flat, Down) to separate noise from actual downward moves.
-- **Phase 9 (Integration)**: The quantile loss is small and "stuck". This is expected for return forecasting. Monitor `directional_accuracy` instead of raw loss.
-- **Hyperparameters**: If instability persists, try reducing the learning rate for specific phases or increasing the batch size.
+## 4. Missing `models` Directory
+**Observation:** The `src/models` directory was not visible in the file list, yet the code runs. This suggests it exists in your environment but might be ignored by git or located elsewhere in `PYTHONPATH`. Ensure `models/temporal_fusion.py` and `models/multitask.py` are committed if you plan to share the repo.
+
+## 5. Action Plan
+1.  **Modify `Phase1DirectionTask`**: Increase `time_limit` to `100` in `src/training/phases/phase1_direction.py`.
+2.  **Modify `run_full_training.py`**:
+    - Change `Phase4SmartMoneyTask` weight to `0.05`.
+    - Change `gradient_norm_target` to `0.5` in `mt_config`.
+3.  **Run Sanity Check**: If possible, try training *only* Phase 1 (disable others in `all_tasks` list) to see if it can overfit a small batch. This confirms the model architecture is capable of learning the task.
